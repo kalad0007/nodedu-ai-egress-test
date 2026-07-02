@@ -1,0 +1,5 @@
+nodedu-ai-egress-test/
+  package.json
+  api/
+    ai-ping.js
+  .gitignore
