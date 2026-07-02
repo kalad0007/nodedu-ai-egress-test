@@ -56,7 +56,7 @@ async function pingModel(model, timeoutMs) {
           },
         ],
         temperature: 0,
-        max_tokens: 8,
+        max_tokens: 16,
       }),
     });
 
