@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { POST } from "./ai-embed.js";
+import { POST } from "../api/ai-embed.js";
 
 const originalFetch = globalThis.fetch;
 const originalSecret = process.env.AI_EGRESS_SHARED_SECRET;
