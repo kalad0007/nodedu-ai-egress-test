@@ -58,9 +58,23 @@ function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function resolveTtsInput(body) {
+  const inputType = body?.inputType === "ssml" ? "ssml" : "text";
+  const value = inputType === "ssml" ? body?.ssml : body?.text;
+  return {
+    inputType,
+    value,
+    googleInput: inputType === "ssml" ? { ssml: value } : { text: value },
+  };
+}
+
 function assertBody(body) {
   if (!body || typeof body !== "object") return "Request body must be JSON";
-  if (typeof body.text !== "string" || !body.text.trim()) return "text is required";
+  if (body.inputType !== undefined && body.inputType !== "text" && body.inputType !== "ssml") {
+    return "inputType must be text or ssml";
+  }
+  const input = resolveTtsInput(body);
+  if (typeof input.value !== "string" || !input.value.trim()) return `${input.inputType} is required`;
   if (typeof body.voiceName !== "string" || !body.voiceName.trim()) return "voiceName is required";
   if (typeof body.languageCode !== "string" || !body.languageCode.trim()) return "languageCode is required";
   if (body.apiVersion !== "v1" && body.apiVersion !== "v1beta1") return "apiVersion must be v1 or v1beta1";
@@ -82,6 +96,7 @@ function inferGoogleStatus(payload, fallbackStatus) {
 }
 
 async function synthesizeGoogleTts(body) {
+  const input = resolveTtsInput(body);
   const timeoutMs = resolveTimeoutMs(body);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -97,7 +112,7 @@ async function synthesizeGoogleTts(body) {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          input: { text: body.text },
+          input: input.googleInput,
           voice: { languageCode: body.languageCode, name: body.voiceName },
           audioConfig: body.audioConfig,
         }),
@@ -186,12 +201,14 @@ export async function POST(request) {
 
   try {
     const result = await synthesizeGoogleTts(body);
+    const input = resolveTtsInput(body);
     console.log("[tts-synthesize]", JSON.stringify({
       voiceName: body.voiceName,
       languageCode: body.languageCode,
       apiVersion: body.apiVersion,
       purpose: body.purpose || null,
-      textChars: body.text.length,
+      inputType: input.inputType,
+      inputChars: input.value.length,
       elapsedMs: result.elapsedMs,
       ts: Date.now(),
     }));
@@ -202,6 +219,7 @@ export async function POST(request) {
       voiceName: body.voiceName,
       languageCode: body.languageCode,
       apiVersion: body.apiVersion,
+      inputType: input.inputType,
       audioBase64: result.audioBase64,
       elapsedMs: result.elapsedMs,
       vercel: vercelContext(request),
