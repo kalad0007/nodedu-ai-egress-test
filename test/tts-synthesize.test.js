@@ -23,7 +23,13 @@ test("forwards SSML to Google and confirms the input type", async (t) => {
   let googleBody;
   globalThis.fetch = async (_url, init) => {
     googleBody = JSON.parse(String(init.body));
-    return new Response(JSON.stringify({ audioContent: "YXVkaW8=" }), { status: 200 });
+    return new Response(JSON.stringify({
+      audioContent: "YXVkaW8=",
+      timepoints: [
+        { markName: "lr_gap_1_start", timeSeconds: 1.2 },
+        { markName: "lr_gap_1_end", timeSeconds: 1.4 },
+      ],
+    }), { status: 200 });
   };
 
   t.after(() => {
@@ -39,8 +45,9 @@ test("forwards SSML to Google and confirms the input type", async (t) => {
     ssml: '<speak>First.<break time="400ms"/>Second.</speak>',
     voiceName: "en-US-Neural2-F",
     languageCode: "en-US",
-    apiVersion: "v1",
+    apiVersion: "v1beta1",
     audioConfig: { audioEncoding: "MP3" },
+    enableTimePointing: ["SSML_MARK"],
   }));
   const payload = await response.json();
 
@@ -49,6 +56,11 @@ test("forwards SSML to Google and confirms the input type", async (t) => {
   assert.deepEqual(googleBody.input, {
     ssml: '<speak>First.<break time="400ms"/>Second.</speak>',
   });
+  assert.deepEqual(googleBody.enableTimePointing, ["SSML_MARK"]);
+  assert.deepEqual(payload.timepoints, [
+    { markName: "lr_gap_1_start", timeSeconds: 1.2 },
+    { markName: "lr_gap_1_end", timeSeconds: 1.4 },
+  ]);
 });
 
 test("keeps the version-one text contract compatible", async (t) => {

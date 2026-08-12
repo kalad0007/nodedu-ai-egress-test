@@ -79,7 +79,29 @@ function assertBody(body) {
   if (typeof body.languageCode !== "string" || !body.languageCode.trim()) return "languageCode is required";
   if (body.apiVersion !== "v1" && body.apiVersion !== "v1beta1") return "apiVersion must be v1 or v1beta1";
   if (!isPlainObject(body.audioConfig)) return "audioConfig is required";
+  if (body.enableTimePointing !== undefined) {
+    if (
+      input.inputType !== "ssml"
+      || !Array.isArray(body.enableTimePointing)
+      || body.enableTimePointing.length !== 1
+      || body.enableTimePointing[0] !== "SSML_MARK"
+      || body.apiVersion !== "v1beta1"
+    ) {
+      return "enableTimePointing must be [SSML_MARK] for v1beta1 SSML input";
+    }
+  }
   return null;
+}
+
+function parseTimepoints(payload) {
+  if (!Array.isArray(payload?.timepoints)) return [];
+  return payload.timepoints.flatMap((timepoint) => {
+    const markName = typeof timepoint?.markName === "string" ? timepoint.markName.trim() : "";
+    const timeSeconds = Number(timepoint?.timeSeconds);
+    return markName && Number.isFinite(timeSeconds) && timeSeconds >= 0
+      ? [{ markName, timeSeconds }]
+      : [];
+  });
 }
 
 function extractGoogleErrorMessage(payload, bodyText) {
@@ -115,6 +137,7 @@ async function synthesizeGoogleTts(body) {
           input: input.googleInput,
           voice: { languageCode: body.languageCode, name: body.voiceName },
           audioConfig: body.audioConfig,
+          ...(body.enableTimePointing ? { enableTimePointing: body.enableTimePointing } : {}),
         }),
       },
     );
@@ -150,6 +173,7 @@ async function synthesizeGoogleTts(body) {
 
     return {
       audioBase64: payload.audioContent,
+      timepoints: parseTimepoints(payload),
       elapsedMs,
     };
   } catch (error) {
@@ -209,6 +233,7 @@ export async function POST(request) {
       purpose: body.purpose || null,
       inputType: input.inputType,
       inputChars: input.value.length,
+      timepointCount: result.timepoints.length,
       elapsedMs: result.elapsedMs,
       ts: Date.now(),
     }));
@@ -221,6 +246,7 @@ export async function POST(request) {
       apiVersion: body.apiVersion,
       inputType: input.inputType,
       audioBase64: result.audioBase64,
+      timepoints: result.timepoints,
       elapsedMs: result.elapsedMs,
       vercel: vercelContext(request),
     });
