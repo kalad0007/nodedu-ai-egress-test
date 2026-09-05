@@ -4,5 +4,27 @@
     "deploymentEnabled": {
       "main": false
     }
+  },
+  "functions": {
+    "api/ai-generate.js": {
+      "maxDuration": 300,
+      "supportsCancellation": true
+    },
+    "api/ai-provider.js": {
+      "maxDuration": 300,
+      "supportsCancellation": true
+    },
+    "api/tts-synthesize.js": {
+      "maxDuration": 300,
+      "supportsCancellation": true
+    },
+    "api/ai-embed.js": {
+      "maxDuration": 300,
+      "supportsCancellation": true
+    },
+    "api/ai-image.js": {
+      "maxDuration": 300,
+      "supportsCancellation": true
+    }
   }
 }

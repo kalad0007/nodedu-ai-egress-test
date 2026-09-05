@@ -8,6 +8,7 @@ class GoogleTtsError extends Error {
     this.status = options.status || 502;
     this.body = options.body || "";
     this.elapsedMs = options.elapsedMs || null;
+    this.fallbackEligible = options.fallbackEligible === true;
   }
 }
 
@@ -31,9 +32,9 @@ function vercelContext(request) {
 }
 
 function authorize(request) {
-  const expected = process.env.AI_EGRESS_SHARED_SECRET;
+  const expected = process.env.TTS_EGRESS_SHARED_SECRET || process.env.AI_EGRESS_SHARED_SECRET;
   if (!expected) {
-    return { ok: false, status: 500, error: "AI_EGRESS_SHARED_SECRET is not configured" };
+    return { ok: false, status: 500, error: "TTS_EGRESS_SHARED_SECRET or AI_EGRESS_SHARED_SECRET is not configured" };
   }
 
   const actual = request.headers.get("x-nodedu-ai-egress-secret");
@@ -68,7 +69,7 @@ function resolveTtsInput(body) {
   };
 }
 
-function assertBody(body) {
+function assertSynthesisRequest(body) {
   if (!body || typeof body !== "object") return "Request body must be JSON";
   if (body.inputType !== undefined && body.inputType !== "text" && body.inputType !== "ssml") {
     return "inputType must be text or ssml";
@@ -89,6 +90,17 @@ function assertBody(body) {
     ) {
       return "enableTimePointing must be [SSML_MARK] for v1beta1 SSML input";
     }
+  }
+  return null;
+}
+
+function assertBody(body) {
+  const primaryError = assertSynthesisRequest(body);
+  if (primaryError) return primaryError;
+  if (body.fallback !== undefined) {
+    if (!isPlainObject(body.fallback)) return "fallback must be an object";
+    const fallbackError = assertSynthesisRequest(body.fallback);
+    if (fallbackError) return `fallback.${fallbackError}`;
   }
   return null;
 }
@@ -117,19 +129,29 @@ function inferGoogleStatus(payload, fallbackStatus) {
   return fallbackStatus >= 400 ? fallbackStatus : 502;
 }
 
-async function synthesizeGoogleTts(body) {
+function isFallbackEligibleProviderError(status, message) {
+  if (status !== 400 && status !== 404) return false;
+  return /(?:voice[^.]{0,120}(?:unavailable|not available|not found|does not exist|unsupported|incompatible|invalid)|(?:unavailable|not available|not found|does not exist|unsupported|incompatible|invalid)[^.]{0,120}voice)/i.test(message);
+}
+
+function createAbortError(signal) {
+  const timedOut = signal.reason?.name === "TimeoutError";
+  return new GoogleTtsError(timedOut ? "Google TTS request timeout" : "Google TTS request cancelled", {
+    status: timedOut ? 504 : 499,
+  });
+}
+
+async function synthesizeGoogleTts(body, signal) {
   const input = resolveTtsInput(body);
-  const timeoutMs = resolveTimeoutMs(body);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
 
   try {
+    if (signal.aborted) throw createAbortError(signal);
     const response = await fetch(
       `https://texttospeech.googleapis.com/${body.apiVersion}/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY}`,
       {
         method: "POST",
-        signal: controller.signal,
+        signal,
         headers: {
           "content-type": "application/json",
         },
@@ -148,18 +170,24 @@ async function synthesizeGoogleTts(body) {
     try {
       payload = JSON.parse(bodyText);
     } catch {
+      const status = response.ok ? 502 : response.status;
+      const message = `Google TTS returned non-JSON response: ${bodyText.slice(0, 500)}`;
       throw new GoogleTtsError(`Google TTS returned non-JSON response: ${bodyText.slice(0, 500)}`, {
-        status: response.ok ? 502 : response.status,
+        status,
         body: bodyText.slice(0, 1000),
         elapsedMs,
+        fallbackEligible: !response.ok && isFallbackEligibleProviderError(status, message),
       });
     }
 
     if (!response.ok || payload?.error) {
-      throw new GoogleTtsError(extractGoogleErrorMessage(payload, bodyText), {
-        status: inferGoogleStatus(payload, response.status),
+      const message = extractGoogleErrorMessage(payload, bodyText);
+      const status = inferGoogleStatus(payload, response.status);
+      throw new GoogleTtsError(message, {
+        status,
         body: bodyText.slice(0, 1000),
         elapsedMs,
+        fallbackEligible: !response.ok && isFallbackEligibleProviderError(status, message),
       });
     }
 
@@ -177,15 +205,12 @@ async function synthesizeGoogleTts(body) {
       elapsedMs,
     };
   } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new GoogleTtsError(`Google TTS timeout after ${timeoutMs}ms`, {
-        status: 504,
-        elapsedMs: Date.now() - startedAt,
-      });
+    if (signal.aborted) {
+      const abortError = createAbortError(signal);
+      abortError.elapsedMs = Date.now() - startedAt;
+      throw abortError;
     }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -223,17 +248,43 @@ export async function POST(request) {
     return json({ ok: false, error: bodyError, vercel: vercelContext(request) }, 400);
   }
 
+  const timeoutMs = resolveTimeoutMs(body);
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(new DOMException("Caller cancelled", "AbortError"));
+  if (request.signal.aborted) abortFromCaller();
+  else request.signal.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException(`Google TTS timeout after ${timeoutMs}ms`, "TimeoutError")),
+    timeoutMs,
+  );
+
   try {
-    const result = await synthesizeGoogleTts(body);
-    const input = resolveTtsInput(body);
+    let synthesisBody = body;
+    let fallbackUsed = false;
+    let result;
+    try {
+      result = await synthesizeGoogleTts(body, controller.signal);
+    } catch (primaryError) {
+      if (
+        !(primaryError instanceof GoogleTtsError)
+        || !primaryError.fallbackEligible
+        || !body.fallback
+        || controller.signal.aborted
+      ) throw primaryError;
+      synthesisBody = body.fallback;
+      fallbackUsed = true;
+      result = await synthesizeGoogleTts(synthesisBody, controller.signal);
+    }
+    const input = resolveTtsInput(synthesisBody);
     console.log("[tts-synthesize]", JSON.stringify({
-      voiceName: body.voiceName,
-      languageCode: body.languageCode,
-      apiVersion: body.apiVersion,
+      voiceName: synthesisBody.voiceName,
+      languageCode: synthesisBody.languageCode,
+      apiVersion: synthesisBody.apiVersion,
       purpose: body.purpose || null,
       inputType: input.inputType,
       inputChars: input.value.length,
       timepointCount: result.timepoints.length,
+      fallbackUsed,
       elapsedMs: result.elapsedMs,
       ts: Date.now(),
     }));
@@ -241,12 +292,13 @@ export async function POST(request) {
     return json({
       ok: true,
       provider: "google-tts",
-      voiceName: body.voiceName,
-      languageCode: body.languageCode,
-      apiVersion: body.apiVersion,
+      voiceName: synthesisBody.voiceName,
+      languageCode: synthesisBody.languageCode,
+      apiVersion: synthesisBody.apiVersion,
       inputType: input.inputType,
       audioBase64: result.audioBase64,
       timepoints: result.timepoints,
+      fallbackUsed,
       elapsedMs: result.elapsedMs,
       vercel: vercelContext(request),
     });
@@ -260,6 +312,9 @@ export async function POST(request) {
       provider: "google-tts",
       error: serialized,
       vercel: vercelContext(request),
-    }, googleError.status === 504 ? 504 : 502);
+    }, googleError.status === 499 || googleError.status === 504 ? googleError.status : 502);
+  } finally {
+    clearTimeout(timeout);
+    request.signal.removeEventListener("abort", abortFromCaller);
   }
 }
