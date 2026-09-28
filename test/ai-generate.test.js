@@ -34,6 +34,8 @@ function installTestEnvironment(t) {
   process.env.OPENAI_API_KEY = "openai-key";
   delete process.env.AI_EGRESS_PRIMARY_PROVIDER;
   delete process.env.AI_EGRESS_ALLOW_PROVIDER_FALLBACK;
+  delete process.env.OPENROUTER_MODEL;
+  delete process.env.OPENAI_MODEL;
   console.log = () => {};
 
   t.after(() => {
@@ -148,9 +150,81 @@ test("preserves an explicit OpenRouter multimodal request and reports upstream c
     elapsedMs: payload.providerAttempts[0].elapsedMs,
     providerGenerationId: "or-generation-123",
     finishReason: "length",
+    serviceTier: null,
   }]);
   assert.equal("idempotent" in payload, false);
   assert.equal("idempotency" in payload, false);
+});
+
+test("routes Sol aliases and dated versions through Flex across primary, env, and fallback", async (t) => {
+  installTestEnvironment(t);
+  const routing = { order: ["OpenAI"], sort: "throughput", only: ["OpenAI"], ignore: ["Other"], allow_fallbacks: false };
+  for (const provider of ["openrouter", "openai"]) {
+    for (const model of ["gpt-6-sol", "openai/gpt-6-sol:floor", "openai/gpt-6-sol-20260922:nitro", "gpt-6-sol-2026-09-22", "OPENAI/GPT-6-SOL:NITRO"]) {
+      for (const source of ["primary", "env", "fallback"]) {
+        const calls = [];
+        globalThis.fetch = async (url, init) => {
+          calls.push({ url: String(url), body: JSON.parse(init.body) });
+          if (source === "fallback" && calls.length === 1) return providerError(403);
+          return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], service_tier: "default", usage: { total_tokens: 5 } }));
+        };
+        const body = { aiProvider: provider, system: "system", prompt: "prompt", model, provider: routing };
+        if (source === "env") {
+          delete body.model;
+          delete body.aiProvider;
+          process.env.AI_EGRESS_PRIMARY_PROVIDER = provider;
+          process.env[provider === "openrouter" ? "OPENROUTER_MODEL" : "OPENAI_MODEL"] = model;
+        }
+        if (source === "fallback") {
+          body.model = "gpt-6-luna";
+          body.fallback = { aiProvider: provider, model, provider: routing };
+        }
+        const response = await POST(buildRequest(body));
+        const result = await response.json();
+        assert.equal(response.status, 200, `${provider}/${model}/${source}`);
+        const sent = calls.at(-1).body;
+        const bare = model.toLowerCase().replace(/^openai\//, "").replace(/:.*$/, "");
+        assert.equal(sent.model, provider === "openrouter" ? `openai/${bare}:floor` : bare);
+        if (provider === "openrouter") {
+          assert.deepEqual(sent.provider, { sort: "price", only: ["OpenAI"], ignore: ["Other"], allow_fallbacks: false });
+          assert.equal(sent.service_tier, undefined);
+        } else {
+          assert.equal(sent.service_tier, "flex");
+          assert.equal(sent.provider, undefined);
+        }
+        assert.equal(result.model, sent.model);
+        assert.equal(result.serviceTier, "default");
+        assert.equal(result.usage.service_tier, "default");
+        assert.equal(result.providerAttempts.at(-1).serviceTier, "default");
+        assert.deepEqual(routing.order, ["OpenAI"]);
+      }
+    }
+  }
+});
+
+test("keeps Luna and other models unchanged and never infers returned Flex", async (t) => {
+  installTestEnvironment(t);
+  for (const provider of ["openrouter", "openai"]) {
+    for (const model of ["openai/gpt-6-luna", "openai/gpt-5.6-sol", "openai/gpt-6-sol:online", "openai/gpt-6-sol:free", "openai/gpt-6-sol:floor:online", "openai/gpt-6-sol:nitro:floor", "openai/gpt-6-sol"]) {
+      let sent;
+      globalThis.fetch = async (_url, init) => { sent = JSON.parse(init.body); return providerResponse(); };
+      const result = await (await POST(buildRequest({ aiProvider: provider, model, system: "s", prompt: "p", provider: { order: ["OpenAI"] } }))).json();
+      assert.equal(result.serviceTier, null);
+      assert.equal(result.usage.service_tier, undefined);
+      if (model === "openai/gpt-6-sol") continue;
+      assert.equal(sent.model, provider === "openai" ? model.replace(/^openai\//, "") : model);
+      assert.equal(sent.service_tier, undefined);
+      if (provider === "openrouter") assert.deepEqual(sent.provider, { order: ["OpenAI"] });
+    }
+  }
+});
+
+test("preserves response usage tier when top-level tier is absent", async (t) => {
+  installTestEnvironment(t);
+  globalThis.fetch = async () => providerResponse({ usage: { total_tokens: 3, service_tier: "flex" } });
+  const result = await (await POST(buildRequest({ model: "openai/gpt-6-sol", system: "s", prompt: "p" }))).json();
+  assert.equal(result.serviceTier, "flex");
+  assert.deepEqual(result.usage, { total_tokens: 3, service_tier: "flex" });
 });
 
 test("does not use hidden cross-provider fallback for a legacy request", async (t) => {

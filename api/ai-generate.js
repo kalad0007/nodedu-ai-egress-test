@@ -1,3 +1,5 @@
+import { applySolServiceTier, readServiceTierMetadata } from "../lib/sol-service-tier.js";
+
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_PROVIDER = "openrouter";
@@ -226,6 +228,9 @@ function buildOpenAiRequest(body, model, maxTokens, reasoning) {
   if (isRecord(reasoning) && typeof reasoning.effort === "string") {
     providerRequest.reasoning_effort = reasoning.effort;
   }
+  if (applySolServiceTier("openai", model).serviceTier === "flex") {
+    providerRequest.service_tier = "flex";
+  }
 
   return providerRequest;
 }
@@ -378,7 +383,7 @@ async function postProvider({ provider, model, maxTokens, reasoning, routing, bo
       model,
       text,
       elapsedMs,
-      usage: payload?.usage || null,
+      ...readServiceTierMetadata(payload),
       providerGenerationId: typeof payload?.id === "string" && payload.id.trim() ? payload.id : null,
       ...readFinishMetadata(payload),
     };
@@ -426,6 +431,7 @@ function serializeSuccessAttempt(result) {
     elapsedMs: result.elapsedMs,
     providerGenerationId: result.providerGenerationId,
     finishReason: result.finishReason,
+    serviceTier: result.serviceTier,
   };
 }
 
@@ -451,12 +457,15 @@ function attemptConfig(body, fallback = false) {
   const primaryMaxTokens = resolveMaxTokens(body.maxTokens);
   const reasoning = fallback && config.reasoning !== undefined ? config.reasoning : body.reasoning;
   const routing = fallback && config.provider !== undefined ? config.provider : body.provider;
+  const solConfig = applySolServiceTier(
+    provider, resolveModel(body, provider, fallback ? config.model : body.model), routing,
+  );
   return {
     provider,
-    model: resolveModel(body, provider, fallback ? config.model : body.model),
+    model: solConfig.model,
     maxTokens: fallback ? resolveMaxTokens(config.maxTokens, primaryMaxTokens) : primaryMaxTokens,
     reasoning,
-    routing,
+    routing: solConfig.routing,
   };
 }
 
@@ -529,6 +538,7 @@ export async function POST(request) {
           text: result.text,
           elapsedMs: Date.now() - requestStartedAt,
           usage: result.usage,
+          serviceTier: result.serviceTier,
           providerGenerationId: result.providerGenerationId,
           providerAttempts,
           requestContext,

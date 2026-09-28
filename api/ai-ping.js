@@ -1,3 +1,5 @@
+import { applySolServiceTier, readServiceTierMetadata } from "../lib/sol-service-tier.js";
+
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODELS = ["openai/gpt-5.4", "openai/gpt-5.5"];
 
@@ -33,6 +35,8 @@ function parseTimeoutMs(requestUrl) {
 }
 
 async function pingModel(model, timeoutMs) {
+  const solConfig = applySolServiceTier("openrouter", model);
+  model = solConfig.model;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
@@ -49,6 +53,7 @@ async function pingModel(model, timeoutMs) {
       },
       body: JSON.stringify({
         model,
+        ...(solConfig.routing ? { provider: solConfig.routing } : {}),
         messages: [
           {
             role: "user",
@@ -79,6 +84,7 @@ async function pingModel(model, timeoutMs) {
     return {
       model,
       ok: /pong/i.test(text),
+      ...readServiceTierMetadata(data),
       text,
       elapsedMs,
     };

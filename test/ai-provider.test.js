@@ -28,6 +28,7 @@ function setup(t) {
   process.env.REPLICATE_API_TOKEN = 'replicate-secret'
   process.env.OPENROUTER_API_KEY = 'openrouter-secret'
   delete process.env.AI_PROVIDER_GEMINI_MODELS
+  delete process.env.AI_PROVIDER_OPENROUTER_SPEAKING_MODELS
   t.after(() => {
     globalThis.fetch = originalFetch
     for (const [key, value] of Object.entries(originalEnv)) {
@@ -180,6 +181,28 @@ test('keeps the speaking provider chain inside one Egress request', async (t) =>
   ])
   assert.equal(response.headers.get('x-nodedu-ai-provider'), 'gemini')
   assert.equal(response.headers.get('x-nodedu-ai-model'), 'gemini-3.1-flash-lite')
+})
+
+test('routes env-allowlisted Sol speaking models through floor and preserves actual tier and raw bytes', async (t) => {
+  setup(t)
+  for (const model of ['openai/gpt-6-sol', 'openai/gpt-6-sol:floor', 'openai/gpt-6-sol-20260922:nitro']) {
+    process.env.AI_PROVIDER_OPENROUTER_SPEAKING_MODELS = model.replace(/:.*$/, '')
+    const expectedModel = `${model.replace(/:.*$/, '')}:floor`
+    const body = speakingBody()
+    body.openRouter.model = model
+    for (const tier of ['flex', 'default', null]) {
+      const raw = JSON.stringify({ choices: [], ...(tier ? { service_tier: tier, usage: { service_tier: tier } } : {}) })
+      let sent
+      globalThis.fetch = async (_url, init) => { sent = JSON.parse(init.body); return new Response(raw) }
+      const response = await POST(request({ operation: 'speaking-generate', body }))
+      assert.equal(response.status, 200)
+      assert.equal(sent.model, expectedModel)
+      assert.deepEqual(sent.provider, { sort: 'price' })
+      assert.equal(response.headers.get('x-nodedu-ai-model'), expectedModel)
+      assert.equal(response.headers.get('x-nodedu-ai-service-tier'), tier)
+      assert.equal(await response.text(), raw)
+    }
+  }
 })
 
 test('does not fallback speaking requests after a 400, 504, or transport failure', async (t) => {

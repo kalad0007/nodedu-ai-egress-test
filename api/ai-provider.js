@@ -1,3 +1,5 @@
+import { applySolServiceTier, isSolModel, readServiceTierMetadata } from '../lib/sol-service-tier.js'
+
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const REPLICATE_BASE_URL = 'https://api.replicate.com/v1'
@@ -57,9 +59,17 @@ function configuredOpenRouterSpeakingModels() {
   const models = new Set(OPENROUTER_SPEAKING_MODELS)
   for (const raw of String(process.env.AI_PROVIDER_OPENROUTER_SPEAKING_MODELS || '').split(',')) {
     const model = raw.trim()
-    if (MODEL_PATTERN.test(model)) models.add(model)
+    if (MODEL_PATTERN.test(model) || isSolModel(model)) models.add(model)
   }
   return models
+}
+
+function isAllowedOpenRouterSpeakingModel(model) {
+  const allowed = configuredOpenRouterSpeakingModels()
+  if (allowed.has(model)) return true
+  if (!isSolModel(model)) return false
+  const normalized = applySolServiceTier('openrouter', model).model
+  return [...allowed].some(candidate => applySolServiceTier('openrouter', candidate).model === normalized)
 }
 
 function isPlainObject(value) {
@@ -120,7 +130,7 @@ function validateSpeakingRequest(body) {
   const gemini = body.gemini
   if (!isPlainObject(openRouter) ||
       !hasOnlyKeys(openRouter, new Set(['model', 'messages', 'maxTokens', 'responseFormat'])) ||
-      !configuredOpenRouterSpeakingModels().has(openRouter.model) ||
+      !isAllowedOpenRouterSpeakingModel(openRouter.model) ||
       !isValidSpeakingMessages(openRouter.messages) ||
       openRouter.responseFormat !== 'json_object' ||
       !Number.isInteger(openRouter.maxTokens) || openRouter.maxTokens < 16 || openRouter.maxTokens > 4_000) {
@@ -202,6 +212,7 @@ async function fetchSpeaking(payload, signal) {
   const { openRouter, gemini } = payload.body
   const apiKey = process.env.OPENROUTER_API_KEY
   if (!apiKey) return fetchGeminiChain(gemini, signal)
+  const solConfig = applySolServiceTier('openrouter', openRouter.model)
 
   const response = await fetch(OPENROUTER_URL, {
     method: 'POST',
@@ -212,7 +223,8 @@ async function fetchSpeaking(payload, signal) {
       'x-title': process.env.OPENROUTER_APP_NAME || 'nodedu-ai-egress',
     },
     body: JSON.stringify({
-      model: openRouter.model,
+      model: solConfig.model,
+      ...(solConfig.routing ? { provider: solConfig.routing } : {}),
       messages: openRouter.messages,
       max_tokens: openRouter.maxTokens,
       response_format: { type: 'json_object' },
@@ -220,7 +232,7 @@ async function fetchSpeaking(payload, signal) {
     signal,
   })
   if (response.ok || !shouldFallbackStatus(response.status) || !process.env.GEMINI_API_KEY) {
-    return { response, provider: 'openrouter', model: openRouter.model }
+    return { response, provider: 'openrouter', model: solConfig.model }
   }
   await response.body?.cancel()
   return fetchGeminiChain(gemini, signal)
@@ -273,6 +285,13 @@ function copyProviderResponse(response, bytes, metadata) {
   headers.delete('set-cookie')
   headers.set('x-nodedu-ai-provider', metadata.provider)
   if (metadata.model) headers.set('x-nodedu-ai-model', metadata.model)
+  if (metadata.provider === 'openrouter') {
+    headers.delete('x-nodedu-ai-service-tier')
+    try {
+      const { serviceTier } = readServiceTierMetadata(JSON.parse(new TextDecoder().decode(bytes)))
+      if (serviceTier) headers.set('x-nodedu-ai-service-tier', serviceTier)
+    } catch { /* Preserve raw non-JSON provider responses. */ }
+  }
   return new Response(bytes, {
     status: response.status,
     statusText: response.statusText,
