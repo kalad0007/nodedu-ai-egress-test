@@ -1,7 +1,7 @@
 import { applySolServiceTier, readServiceTierMetadata } from "../lib/sol-service-tier.js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODELS = ["openai/gpt-5.4", "openai/gpt-5.5"];
+const DEFAULT_MODELS = ["openai/gpt-6.1-sol", "openai/gpt-6-luna"];
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {

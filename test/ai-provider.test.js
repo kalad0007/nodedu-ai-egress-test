@@ -187,7 +187,7 @@ test('routes env-allowlisted Sol speaking models through floor and preserves act
   setup(t)
   for (const model of ['openai/gpt-6-sol', 'openai/gpt-6-sol:floor', 'openai/gpt-6-sol-20260922:nitro']) {
     process.env.AI_PROVIDER_OPENROUTER_SPEAKING_MODELS = model.replace(/:.*$/, '')
-    const expectedModel = `${model.replace(/:.*$/, '')}:floor`
+    const expectedModel = 'openai/gpt-6.1-sol:floor'
     const body = speakingBody()
     body.openRouter.model = model
     for (const tier of ['flex', 'default', null]) {

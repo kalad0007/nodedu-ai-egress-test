@@ -1,4 +1,4 @@
-import { applySolServiceTier, readServiceTierMetadata } from "../lib/sol-service-tier.js";
+import { applySolServiceTier, normalizeGptReasoning, readServiceTierMetadata } from "../lib/sol-service-tier.js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
@@ -75,10 +75,10 @@ function normalizeOpenAiModelName(model) {
 function resolveModel(body, provider, explicitModel) {
   const requested = String(explicitModel ?? body.model ?? "").trim();
   if (provider === "openai") {
-    return normalizeOpenAiModelName(requested || process.env.OPENAI_MODEL || "gpt-5.4");
+    return normalizeOpenAiModelName(requested || process.env.OPENAI_MODEL || "gpt-6.1-sol");
   }
 
-  return requested || process.env.OPENROUTER_MODEL || "openai/gpt-5.4";
+  return requested || process.env.OPENROUTER_MODEL || "openai/gpt-6.1-sol";
 }
 
 function positiveInteger(value, fallback) {
@@ -464,7 +464,7 @@ function attemptConfig(body, fallback = false) {
     provider,
     model: solConfig.model,
     maxTokens: fallback ? resolveMaxTokens(config.maxTokens, primaryMaxTokens) : primaryMaxTokens,
-    reasoning,
+    reasoning: normalizeGptReasoning(solConfig.model, reasoning),
     routing: solConfig.routing,
   };
 }
