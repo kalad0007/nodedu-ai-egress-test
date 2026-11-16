@@ -183,6 +183,96 @@ test('keeps the speaking provider chain inside one Egress request', async (t) =>
   assert.equal(response.headers.get('x-nodedu-ai-model'), 'gemini-3.1-flash-lite')
 })
 
+test('accepts the application Gemini models for Speaking primary and fallback calls', async (t) => {
+  setup(t)
+  const models = []
+  globalThis.fetch = async (url, init) => {
+    const host = new URL(url).hostname
+    if (host === 'openrouter.ai') {
+      models.push(JSON.parse(init.body).model)
+      return new Response(null, { status: 429 })
+    }
+    const model = new URL(url).pathname.split('/').at(-1).replace(':generateContent', '')
+    models.push(model)
+    return model === 'gemini-3.5-flash-lite'
+      ? new Response(null, { status: 429 })
+      : new Response('{"candidates":[]}')
+  }
+
+  const body = speakingBody()
+  body.gemini.model = 'gemini-3.5-flash-lite'
+  body.gemini.fallbackModel = 'gemini-3.8-flash'
+  const listenRepeat = await POST(request({ operation: 'speaking-generate', body }))
+  assert.equal(listenRepeat.status, 200)
+  assert.equal(listenRepeat.headers.get('x-nodedu-ai-model'), 'gemini-3.8-flash')
+  assert.deepEqual(models, ['google/gemini-3.5-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'])
+
+  models.length = 0
+  body.gemini.model = 'gemini-3.8-flash'
+  delete body.gemini.fallbackModel
+  const interview = await POST(request({ operation: 'speaking-generate', body }))
+  assert.equal(interview.status, 200)
+  assert.equal(interview.headers.get('x-nodedu-ai-model'), 'gemini-3.8-flash')
+  assert.deepEqual(models, ['google/gemini-3.5-flash-lite', 'gemini-3.8-flash'])
+})
+
+test('evaluates OpenRouter when the requested Gemini alternatives are unknown', async (t) => {
+  setup(t)
+  const body = speakingBody()
+  body.gemini.model = 'gemini-future-model'
+  body.gemini.fallbackModel = 'gemini-future-alternate'
+  const calls = []
+  globalThis.fetch = async url => {
+    calls.push(new URL(url).hostname)
+    return new Response('{"choices":[]}')
+  }
+  const success = await POST(request({ operation: 'speaking-generate', body }))
+  assert.equal(success.status, 200)
+  assert.equal(success.headers.get('x-nodedu-ai-provider'), 'openrouter')
+
+  globalThis.fetch = async url => {
+    calls.push(new URL(url).hostname)
+    return new Response('rate limited', { status: 429 })
+  }
+  const limited = await POST(request({ operation: 'speaking-generate', body }))
+  assert.equal(limited.status, 429)
+  assert.deepEqual(calls, ['openrouter.ai', 'openrouter.ai'])
+
+  delete process.env.OPENROUTER_API_KEY
+  const unavailable = await POST(request({ operation: 'speaking-generate', body }))
+  assert.equal(unavailable.status, 503)
+  assert.equal(calls.length, 2)
+})
+
+test('uses the first allowed Gemini model when the OpenRouter key is absent', async (t) => {
+  setup(t)
+  delete process.env.OPENROUTER_API_KEY
+  const body = speakingBody()
+  body.gemini.model = 'gemini-future-model'
+  const calls = []
+  globalThis.fetch = async url => {
+    calls.push(new URL(url).pathname)
+    return new Response('{"candidates":[]}')
+  }
+  const response = await POST(request({ operation: 'speaking-generate', body }))
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('x-nodedu-ai-model'), 'gemini-3.1-flash-lite')
+  assert.deepEqual(calls, ['/v1beta/models/gemini-3.1-flash-lite:generateContent'])
+})
+
+test('rejects malformed Gemini alternatives before invoking any provider', async (t) => {
+  setup(t)
+  let calls = 0
+  globalThis.fetch = async () => { calls += 1; return new Response('{}') }
+  for (const model of [undefined, 'https://example.test/alternate', {}]) {
+    const body = speakingBody()
+    body.gemini.model = model
+    const response = await POST(request({ operation: 'speaking-generate', body }))
+    assert.equal(response.status, 400)
+  }
+  assert.equal(calls, 0)
+})
+
 test('routes env-allowlisted Sol speaking models through floor and preserves actual tier and raw bytes', async (t) => {
   setup(t)
   for (const model of ['openai/gpt-6-sol', 'openai/gpt-6-sol:floor', 'openai/gpt-6-sol-20260922:nitro']) {

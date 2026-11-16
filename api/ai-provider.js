@@ -13,6 +13,8 @@ const GEMINI_MODELS = new Set([
   'gemini-3.1-flash-lite',
   'gemini-3.1-flash-image',
   'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.8-flash',
 ])
 const REPLICATE_MODELS = new Set([
   'black-forest-labs/flux-2-klein-9b',
@@ -122,6 +124,10 @@ function isValidGeminiSpeakingBody(body) {
   })
 }
 
+function isGeminiModelId(model) {
+  return typeof model === 'string' && MODEL_PATTERN.test(model)
+}
+
 function validateSpeakingRequest(body) {
   if (!isPlainObject(body) || !hasOnlyKeys(body, new Set(['openRouter', 'gemini']))) {
     return 'Invalid speaking provider body'
@@ -138,9 +144,9 @@ function validateSpeakingRequest(body) {
   }
   if (!isPlainObject(gemini) ||
       !hasOnlyKeys(gemini, new Set(['model', 'fallbackModel', 'body'])) ||
-      !configuredGeminiModels().has(gemini.model) ||
+      !isGeminiModelId(gemini.model) ||
       (gemini.fallbackModel !== undefined && (
-        !configuredGeminiModels().has(gemini.fallbackModel) || gemini.fallbackModel === gemini.model
+        !isGeminiModelId(gemini.fallbackModel) || gemini.fallbackModel === gemini.model
       )) ||
       !isValidGeminiSpeakingBody(gemini.body)) {
     return 'Invalid Gemini speaking request'
@@ -210,8 +216,20 @@ async function fetchGeminiChain(gemini, signal) {
 
 async function fetchSpeaking(payload, signal) {
   const { openRouter, gemini } = payload.body
+  // App and Egress can deploy at different times. Only send allowlisted models
+  // when the Gemini route is used, so a newer fallback cannot block OpenRouter.
+  const allowedGeminiModels = configuredGeminiModels()
+  const [model, fallbackModel] = [gemini.model, gemini.fallbackModel]
+    .filter(candidate => allowedGeminiModels.has(candidate))
+  const geminiRoute = model && process.env.GEMINI_API_KEY
+    ? { model, fallbackModel, body: gemini.body }
+    : null
+
   const apiKey = process.env.OPENROUTER_API_KEY
-  if (!apiKey) return fetchGeminiChain(gemini, signal)
+  if (!apiKey) {
+    if (geminiRoute) return fetchGeminiChain(geminiRoute, signal)
+    return { response: json({ error: 'Gemini speaking route is unavailable' }, 503), provider: 'gemini', model: null }
+  }
   const solConfig = applySolServiceTier('openrouter', openRouter.model)
 
   const response = await fetch(OPENROUTER_URL, {
@@ -231,11 +249,11 @@ async function fetchSpeaking(payload, signal) {
     }),
     signal,
   })
-  if (response.ok || !shouldFallbackStatus(response.status) || !process.env.GEMINI_API_KEY) {
+  if (response.ok || !shouldFallbackStatus(response.status) || !geminiRoute) {
     return { response, provider: 'openrouter', model: solConfig.model }
   }
   await response.body?.cancel()
-  return fetchGeminiChain(gemini, signal)
+  return fetchGeminiChain(geminiRoute, signal)
 }
 
 async function fetchProvider(payload, signal) {
